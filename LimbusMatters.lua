@@ -8,7 +8,7 @@ modification, is permitted provided that the following conditions are met:
     * Redistributions in binary form must reproduce the above copyright
       notice, this list of conditions and the following disclaimer in the
       documentation and/or other materials provided with the distribution.
-    * Neither the name of joe99 nor the
+    * Neither the name of LimbusMatters.
       names of its author may be used to endorse or promote products
       derived from this software without specific prior written permission.
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
@@ -24,21 +24,21 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ]]
 
 --[[
-    Display data progress in the two Limbii. Completed climb tracking and Code status that resets weekly. Chest open order tracking.
+    Display data progress in the two Limbii. Completed climb tracking and Code status that resets weekly. Chest open order tracking. Tracks 5k chests and keeps an accessible history of Alabaster / Murky Matter drops each week.
 ]]
 
-_addon.name = 'Climbus'
+_addon.name = 'LimbusMatters'
 _addon.author = 'Staticvoid'
 _addon.version = '1.0'
-_addon.commands = {'Climbus'}
+_addon.commands = {'LimbusMatters','lm'}
 
-require('logger')
-_Animationator = require('splash')
+
+local _Animationator = require('splash')
 local config = require('config')
 local texts = require('texts')
 local images = require('images')
 local packets = require('packets')
-
+require('logger')
 local check_settings = windower.get_windower_settings()
 local check_icon = images.new({
     texture = {
@@ -65,12 +65,15 @@ local defaults = {
     apollyon_message_id = 7289,
     temenos_code_obtained = false,
     apollyon_code_obtained = false,
+    temenos_last_5k = '',
+    apollyon_last_5k = '',
+    matter_history = {},
     limbus_chest_order = {
         temenos = {
-            N4 = 1,
-            W4 = 2,
-            E4 = 3,
-            C3 = 4,
+            N4 = 4,
+            W4 = 3,
+            E4 = 2,
+            C3 = 1,
         },
         apollyon = {
             NW5 = 4,
@@ -82,6 +85,13 @@ local defaults = {
 }
 local settings
 if player_info then settings = config.load('data/settings_'..player_info..'.xml', defaults) else settings = config.load(defaults) end
+if not settings.temenos_last_5k or settings.temenos_last_5k == '' then
+    settings.temenos_last_5k = 'C'
+end
+if not settings.apollyon_last_5k or settings.apollyon_last_5k == '' then
+    settings.apollyon_last_5k = 'SE'
+end
+config.save(settings)
 
 local function get_climb_message_id(area)
     if area == 'Temenos' then
@@ -94,9 +104,6 @@ end
 --Chest detection window to dynamically update Message ID after an update.
 local chest_check_until = 0
 local MESSAGE_ID_RANGE = 5
-local function begin_chest_check()
-    chest_check_until = os.time() + 5
-end
 
 local chest_npcs = {
     Temenos = {
@@ -112,15 +119,12 @@ local chest_npcs = {
         [16933566] = 'SE4',
     },
 }
-
-local toggle_sound = settings.toggle_sound
-local check_sound = windower.addon_path .. 'data/check.wav'
-local reset_check = false
-local current_area = nil
-local current_floor = nil
-local climbs = {
-    Temenos = tonumber(settings.temenos_climbs) or 0,
-    Apollyon = tonumber(settings.apollyon_climbs) or 0,
+local RACE_SHARDS = {
+    [1] = 10006, [2] = 10006,  -- Hume M&F:     Hope
+    [3] = 10007, [4] = 10007,  -- Elvaan M&F:   Trust
+    [5] = 10008, [6] = 10008,  -- Tarutaru M&F: Bravery
+    [7] = 10009,               -- Mithra F:     Justice
+    [8] = 10010                -- Galka M:      Mercy
 }
 local floor_lookup = {
     Temenos = {
@@ -131,16 +135,10 @@ local floor_lookup = {
     },
 
     Apollyon = {
-        [11]=9981, [12]=9982, [13]=9983,
-        [14]=9984, [15]=9985,
-
+        [11]=9981, [12]=9982, [13]=9983, [14]=9984, [15]=9985,
         [21]=9986, [22]=9987, [23]=9988, [24]=9989,
-
-        [31]=9990, [32]=9991, [33]=9992,
-        [34]=9993, [35]=9994,
-
-        [41]=9995, [42]=9996, [43]=9997,
-        [44]=9998,
+        [31]=9990, [32]=9991, [33]=9992, [34]=9993, [35]=9994,
+        [41]=9995, [42]=9996, [43]=9997, [44]=9998,
     },
 }
 local limbus_data = {
@@ -190,6 +188,18 @@ local limbus_data = {
         {name = 'SE4', id = 9998},
         {name = 'Code', id = 10045},
     },
+}
+
+local toggle_sound = settings.toggle_sound
+local check_sound = windower.addon_path .. 'data/check.wav'
+local reset_check = false
+local current_area = nil
+local current_floor = nil
+local last_interacted_chest = nil
+local last_interacted_area = nil
+local climbs = {
+    Temenos = tonumber(settings.temenos_climbs) or 0,
+    Apollyon = tonumber(settings.apollyon_climbs) or 0,
 }
 
 local function add_table_entry(zone, entry)
@@ -276,6 +286,11 @@ local AZURE = '\\cs(40,75,235)'
 local MINT = '\\cs(0,223,255)'
 local RESET = '\\cr'
 
+local function get_player_shard_id()
+    local player = windower.ffxi.get_mob_by_target('me')
+    return player and RACE_SHARDS[player.race]
+end
+
 -- Present in one of the Limbii
 local function get_area(zone)
     if zone == 37 then
@@ -337,17 +352,11 @@ local function build_display(area)
         return ''
     end
 
-    local lines = {'   ' .. area:upper() .. ' DATA','  Climbs: ' .. (climbs[area] or 0) .. '/5',''}
-
+    local lines = {'   ' .. area:upper() .. ' DATA','  Climbs: ' .. (climbs[area] or 0) .. '/5'}
     local column_names = area == 'Temenos' and {'N', 'W', 'E', 'C'} or {'NW', 'SW', 'NE', 'SE'}
-
-    local COLUMN_WIDTH = 3
-    local COLUMN_GAP = ' '
-
+    local COLUMN_WIDTH, COLUMN_GAP = 3, ' '
     local owned = get_temp_items()
-
     local code_id = area == 'Temenos' and 10044 or 10045
-
     local columns = {}
 
     for _, name in ipairs(column_names) do
@@ -356,13 +365,7 @@ local function build_display(area)
 
     for _, floor in ipairs(limbus_data[area]) do
 
-        local column
-
-        if area == 'Temenos' then
-            column = floor.name:match('^([NWEC])')
-        else
-            column = floor.name:match('^(%a%a)')
-        end
+        local column = area == 'Temenos' and floor.name:match('^([NWEC])') or floor.name:match('^(%a%a)')
 
         if column and columns[column] then
             table.insert(columns[column], floor)
@@ -375,6 +378,15 @@ local function build_display(area)
         max_rows = math.max(max_rows, #columns[name])
     end
 
+    local last_5k_column = settings[area:lower() .. '_last_5k']
+    local gold_indicators = {}
+
+    for _, name in ipairs(column_names) do
+        gold_indicators[#gold_indicators + 1] = name == last_5k_column and ' ▼ ' or '   '
+    end
+
+    lines[#lines + 1] = '\\cs(255,215,0)' .. table.concat(gold_indicators, COLUMN_GAP) .. RESET
+
     for row = 1, max_rows do
 
         local parts = {}
@@ -382,25 +394,19 @@ local function build_display(area)
         for _, name in ipairs(column_names) do
 
             local floor = columns[name][row]
-
-            -- Code occupies the empty slot in the fourth column
             local is_code_slot = (area == 'Temenos' and name == 'C' and row == 4) or (area == 'Apollyon' and name == 'SE' and row == 5)
 
             if is_code_slot then
 
                 local code_obtained = (area == 'Temenos' and settings.temenos_code_obtained == true) or (area == 'Apollyon' and settings.apollyon_code_obtained == true)
-
                 local code_text = ''
 
                 if owned[code_id] then
-                    -- Currently possessing Code
                     code_text = GREEN .. 'Code' .. RESET
                 elseif not code_obtained then
-                    -- Haven't obtained Code this week
                     code_text = GRAY .. 'Code' .. RESET
                 end
 
-                -- Reserve space when Code is hidden
                 if code_text == '' then
                     code_text = string.rep(' ', math.max(COLUMN_WIDTH, 4))
                 end
@@ -420,12 +426,11 @@ local function build_display(area)
                     color = has_data and MINT or AZURE
                 end
 
-                local padded_name = string.format('%-' .. COLUMN_WIDTH .. 's',floor.name)
+                local padded_name = string.format('%-' .. COLUMN_WIDTH .. 's', floor.name)
 
                 parts[#parts + 1] = color .. padded_name .. RESET
 
             else
-                -- Preserve spacing for missing floors
                 parts[#parts + 1] = string.rep(' ', COLUMN_WIDTH)
             end
         end
@@ -433,27 +438,15 @@ local function build_display(area)
         lines[#lines + 1] = table.concat(parts, COLUMN_GAP)
     end
 
-    -- Find recommended chest
     local next_chest = get_next_chest(area)
-    local next_column = nil
-
-    if next_chest then
-
-        if area == 'Temenos' then
-            next_column = next_chest:match('^([NWEC])')
-        else
-            next_column = next_chest:match('^(%a%a)')
-        end
-    end
-
-    -- Gold triangle beneath recommended chest tower
-    local indicators = {}
+    local next_column = next_chest and (area == 'Temenos' and next_chest:match('^([NWEC])') or next_chest:match('^(%a%a)'))
+    local silver_indicators = {}
 
     for _, name in ipairs(column_names) do
-        indicators[#indicators + 1] = name == next_column and ' ▼ ' or '   '
+        silver_indicators[#silver_indicators + 1] = name == next_column and ' ▲ ' or '   '
     end
 
-    lines[#lines + 1] = '\\cs(255,215,0)' .. table.concat(indicators, COLUMN_GAP) .. RESET
+    lines[#lines + 1] = '\\cs(192,192,192)' .. table.concat(silver_indicators, COLUMN_GAP) .. RESET
 
     return table.concat(lines, '\n  ')
 end
@@ -467,6 +460,18 @@ local function update_display()
     display:text(build_display(current_area))
     display:show()
 end
+
+local function record_last_5k(area, chest)
+    if not area or not chest then return end
+
+    local column = area == 'Temenos' and chest:match('^([NWEC])') or chest:match('^(%a%a)')
+    if not column then return end
+
+    settings[area:lower() .. '_last_5k'] = column
+    config.save(settings)
+    update_display()
+end
+
 
 local info = windower.ffxi.get_info()
 if info then
@@ -486,6 +491,142 @@ local function get_climb_week()
     local week_start = math.floor((jst_now - monday_offset) / WEEK_SECONDS) * WEEK_SECONDS + monday_offset
     return week_start - JST_OFFSET
 end
+
+local MATTER_IDS = {
+    Temenos = 9999,
+    Apollyon = 10000,
+}
+-- Recycle
+local function get_item_count(area, shard)
+    local item_id
+    if shard then item_id = shard else item_id = MATTER_IDS[area] end -- if we have a second argument we want to count shards otherwise count matters
+
+        if not item_id then
+            return 0
+        end
+
+        local total = 0
+
+        for bag = 0, 16 do
+
+            if bag ~= 3 then
+
+                local items = windower.ffxi.get_items(bag)
+
+                if items then
+                    for index, item in pairs(items) do
+
+                        if type(item) == 'table'
+                            and item.id == item_id then
+
+                            total = total + (tonumber(item.count) or 0)
+                        end
+                    end
+                end
+            end
+        end
+
+    return total
+end
+
+local function record_matter(area, count)
+
+    if not MATTER_IDS[area] then
+        return
+    end
+
+    count = tonumber(count) or 1
+
+    if count <= 0 then
+        return
+    end
+
+    local week = os.date('!%Y-%m-%d', get_climb_week() + 9 * 3600)
+
+    settings.matter_history = settings.matter_history or {}
+
+    local history = settings.matter_history
+
+    if not history[week] then
+        history[week] = {
+            temenos = 0,
+            apollyon = 0,
+        }
+    end
+
+    local key = area:lower()
+
+    history[week][key] =
+        (tonumber(history[week][key]) or 0) + count
+
+    config.save(settings)
+
+    windower.add_to_chat(207,
+        (area == 'Temenos' and 'Alabaster' or 'Murky') ..
+        ' Matter weekly total: ' ..
+        history[week][key] .. ' \nTotal held: ' .. get_item_count(area)
+    )
+end
+
+local function show_matter_history()
+
+    local history = settings.matter_history or {}
+    local weeks = {}
+
+    for week in pairs(history) do
+        weeks[#weeks + 1] = week
+    end
+
+    if #weeks == 0 then
+        windower.add_to_chat(207, 'No Matter history recorded yet.')
+        return
+    end
+
+    table.sort(weeks)
+
+    windower.add_to_chat(207, ' \n            Matters\n------------------------------------')
+    windower.add_to_chat(207, 'Week            Temenos   Apollyon')
+    windower.add_to_chat(207, '------------------------------------')
+
+    for _, week in ipairs(weeks) do
+
+        local entry = history[week]
+
+        windower.add_to_chat(207,
+            string.format(
+                '%-14s  %-11d %d',
+                tostring(week),
+                tonumber(entry.temenos) or 0,
+                tonumber(entry.apollyon) or 0
+            )
+        )
+    end
+    local alabaster = get_item_count('Temenos')
+    local murky = get_item_count('Apollyon')
+
+    windower.add_to_chat(207,
+        string.format(
+            ' \nTotal:\n-----------\n Alabaster: %d \n Murky: %d',
+            alabaster,
+            murky
+        )
+    )
+end
+
+local function show_matter_count()
+
+    local alabaster = get_item_count('Temenos')
+    local murky = get_item_count('Apollyon')
+
+    windower.add_to_chat(207,
+        string.format(
+            '  Matters\n-----------\n Alabaster: %d \n Murky: %d',
+            alabaster,
+            murky
+        )
+    )
+end
+
 
 local function check_weekly_reset()
 
@@ -534,12 +675,39 @@ local function sync_code_progress()
     end
 end
 
+local function begin_chest_check()
+
+    chest_check_until = os.time() + 5
+
+    local area, chest = current_area, last_interacted_chest
+
+    if not area then return end
+    local shard_id = get_player_shard_id()
+    local matter_before, shards_before = get_item_count(area), get_item_count(nil,shard_id)
+
+    coroutine.schedule(function()
+
+        if current_area ~= area then return end
+
+        local matter_after, shards_after = get_item_count(area), get_item_count(nil,shard_id)
+
+        if matter_before and matter_after and matter_after > matter_before then
+            record_matter(area, matter_after - matter_before)
+        end
+
+        if shards_before and shards_after and shards_after - shards_before >= 2 and chest then
+            record_last_5k(area, chest)
+        end
+
+    end, 5)
+end
+
 windower.register_event('add item', function(bag, index, id, count)
 
-    if not current_area or bag ~= 3 then
+    if not current_area or bag ~= 3 then -- If not in one of the Limbii AND dealing with Temp. Item skip processing
         return
     end
-
+    
     local is_floor_data = id >= 9956 and id <= 9998
     local is_code = id == 10044 or id == 10045
 
@@ -565,7 +733,7 @@ windower.register_event('add item', function(bag, index, id, count)
 
     update_display()
 
-    if reset_check then
+    if reset_check and current_floor then
         reset_check = false
 
         if toggle_sound then
@@ -580,7 +748,7 @@ end)
 
 windower.register_event('remove item', function(bag, index, id, count)
 
-    if not current_area or bag ~= 3 then
+    if not current_area or bag ~= 3 then -- If not in one of the Limbii AND dealing with Temp. Item skip processing
         return
     end
 
@@ -607,9 +775,6 @@ windower.register_event('outgoing chunk', function(id, data, modified, injected,
         end
         reset_check = true
         check_icon:hide()
-    elseif id == 0x05B then
-        reset_check = true
-        check_icon:hide()
     end
 end)
 
@@ -622,9 +787,13 @@ windower.register_event('outgoing chunk', function(id, data, modified, injected,
         return
     end
     local target = tonumber(p['Target'])
-    if target and chest_npcs[current_area][target] then
-        begin_chest_check()
-        --windower.add_to_chat(207,'Limbus chest detected. Watching for Message ID.')
+    if target then
+        local chest = chest_npcs[current_area] and chest_npcs[current_area][target]
+        if chest then
+            last_interacted_chest = chest
+            last_interacted_area = current_area
+            begin_chest_check()
+        end
     end
 end)
 
@@ -662,8 +831,12 @@ windower.register_event('incoming chunk', function(id, data, modified, injected,
 
     local msg_id = tonumber(packet['Message ID'])
     local remaining = tonumber(packet['Param 1'])
+    local window_active = os.time() <= chest_check_until
 
-    if not msg_id or not remaining then
+    if not msg_id or not remaining then return end
+
+    if remaining == 5000 and window_active and last_interacted_chest and last_interacted_area == current_area then
+        record_last_5k(current_area, last_interacted_chest)
         return
     end
 
@@ -673,7 +846,6 @@ windower.register_event('incoming chunk', function(id, data, modified, injected,
     end
 
     local expected_id = get_climb_message_id(current_area)
-    local window_active = os.time() <= chest_check_until
 
     if not expected_id then
         return
@@ -705,8 +877,8 @@ windower.register_event('incoming chunk', function(id, data, modified, injected,
 
     check_weekly_reset()
 
-    -- If it passes our checks, we have the new MSG ID update the MSG ID and save it to xml.
-    windower.add_to_chat(207,'Climbus: ' .. current_area ..' Message ID changed: ' ..expected_id .. ' -> ' .. msg_id)
+    -- If it passes our checks and we have the new MSG ID update the MSG ID and save it to xml.
+    windower.add_to_chat(207,'LimbusMatters: ' .. current_area ..' Message ID changed: ' ..expected_id .. ' -> ' .. msg_id)
 
     settings[setting_key] = msg_id
     climbs[current_area] = new_climbs
@@ -786,6 +958,13 @@ windower.register_event('login', function()
         ('data/settings_%s.xml'):format(player_info.name),
         defaults
     )
+    if not settings.temenos_last_5k or settings.temenos_last_5k == '' then
+        settings.temenos_last_5k = 'C'
+    end
+    if not settings.apollyon_last_5k or settings.apollyon_last_5k == '' then
+        settings.apollyon_last_5k = 'SE'
+    end
+    config.save(settings)
     local info = windower.ffxi.get_info()
     current_area = info and get_area(info.zone) or nil
     if current_area then
@@ -807,6 +986,11 @@ windower.register_event('load', function()
     else
         unregister_limbus_events()
     end
+    coroutine.schedule(function()
+        if player_info then 
+            show_matter_history()
+        end
+    end,6)
 end)
 
 windower.register_event('ipc message', function(msg)
@@ -835,5 +1019,9 @@ local cmd = args[1]:lower()
         chestdata = chestdata:gsub('%s+', '')
         windower.send_ipc_message('sync_limbus_chests '..chestdata)
         log('Chest tracking replicated across all other characters to match this character for both Limbii.')
+    elseif cmd == 'r' then 
+        windower.send_command('lua r LimbusMatters')
+    elseif cmd:contains('matter') or cmd == 'history' then
+        show_matter_history()
     end
 end)
