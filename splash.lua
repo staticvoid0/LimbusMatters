@@ -8,9 +8,9 @@ local center_x = screen.ui_x_res / 2
 local center_y = screen.ui_y_res / 2
 
 local FRAME_COUNT = 72
-local ROTATIONS = 4
-local SPLASH_DURATION = 10.0
-local HOLD_DURATION = 4.0
+local ROTATIONS = 6
+local SPLASH_DURATION = 6.0
+local HOLD_DURATION = 3.0
 local FRAME_SIZE = 512
 
 local start_x = center_x - 140

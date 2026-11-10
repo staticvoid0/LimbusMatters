@@ -1,4 +1,4 @@
-# LimbusMatters™
+# LimbusMatters 1.1™
 
 **A Limbus progress tracker for Windower 4 (Final Fantasy XI).**
 

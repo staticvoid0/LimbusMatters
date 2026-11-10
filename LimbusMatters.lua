@@ -29,7 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 _addon.name = 'LimbusMatters'
 _addon.author = 'Staticvoid'
-_addon.version = '1.0'
+_addon.version = '1.1'
 _addon.commands = {'LimbusMatters','lm'}
 
 
@@ -55,7 +55,7 @@ local check_icon = images.new({
 check_icon:pos(check_settings.ui_x_res / 150, check_settings.ui_y_res / 18)
 check_icon:size(17, 17)
 check_icon:fit(false)
-local player_info = windower.ffxi.get_info().logged_in and windower.ffxi.get_player().name
+
 local defaults = {
     toggle_sound = true,
     temenos_climbs = 0,
@@ -84,14 +84,54 @@ local defaults = {
     },
 }
 local settings
-if player_info then settings = config.load('data/settings_'..player_info..'.xml', defaults) else settings = config.load(defaults) end
-if not settings.temenos_last_5k or settings.temenos_last_5k == '' then
-    settings.temenos_last_5k = 'C'
+local loaded_character = nil
+local toggle_sound
+local climbs = {}
+local function load_character_settings()
+
+    local player = windower.ffxi.get_player()
+
+    if not player or not player.name or player.name == '' then
+        return false
+    end
+
+    -- Already loaded settings for this character.
+    if loaded_character == player.name then
+        return true
+    end
+
+    settings = config.load(
+        ('data/settings_%s.xml'):format(player.name),
+        defaults
+    )
+
+    if not settings then
+        return false
+    end
+
+    if not settings.temenos_last_5k or settings.temenos_last_5k == '' then
+        settings.temenos_last_5k = 'C'
+    end
+
+    if not settings.apollyon_last_5k or settings.apollyon_last_5k == '' then
+        settings.apollyon_last_5k = 'SE'
+    end
+
+    loaded_character = player.name
+
+    config.save(settings)
+    toggle_sound = settings.toggle_sound
+
+    climbs.Temenos = tonumber(settings.temenos_climbs) or 0
+    climbs.Apollyon = tonumber(settings.apollyon_climbs) or 0
+    windower.add_to_chat(207,
+        'LimbusMatters: Loaded settings for ' .. loaded_character
+    )
+
+    return true
 end
-if not settings.apollyon_last_5k or settings.apollyon_last_5k == '' then
-    settings.apollyon_last_5k = 'SE'
-end
-config.save(settings)
+-- Attempt immediately if character information is available.
+load_character_settings()
 
 local function get_climb_message_id(area)
     if area == 'Temenos' then
@@ -190,17 +230,16 @@ local limbus_data = {
     },
 }
 
-local toggle_sound = settings.toggle_sound
+
 local check_sound = windower.addon_path .. 'data/check.wav'
+local it_dont_matter = windower.addon_path .. 'data/faa.wav'
 local reset_check = false
 local current_area = nil
 local current_floor = nil
 local last_interacted_chest = nil
 local last_interacted_area = nil
-local climbs = {
-    Temenos = tonumber(settings.temenos_climbs) or 0,
-    Apollyon = tonumber(settings.apollyon_climbs) or 0,
-}
+local floor_flicker = true
+
 
 local function add_table_entry(zone, entry)
     local t = settings.limbus_chest_order[zone]
@@ -283,11 +322,13 @@ display:hide()
 local GREEN = '\\cs(0,255,0)'
 local GRAY  = '\\cs(110,110,110)'
 local AZURE = '\\cs(40,75,235)'
+local SILVER = '\\cs(192,192,192)'
 local MINT = '\\cs(0,223,255)'
 local RESET = '\\cr'
 
 local function get_player_shard_id()
     local player = windower.ffxi.get_mob_by_target('me')
+    if player.name == 'Targaryan' then return 10006 end
     return player and RACE_SHARDS[player.race]
 end
 
@@ -423,7 +464,7 @@ local function build_display(area)
                 end
 
                 if current_floor == floor.id then
-                    color = has_data and MINT or AZURE
+                    color = floor_flicker and (has_data and GREEN or GRAY) or SILVER
                 end
 
                 local padded_name = string.format('%-' .. COLUMN_WIDTH .. 's', floor.name)
@@ -461,6 +502,27 @@ local function update_display()
     display:show()
 end
 
+local flicker_running = false
+
+local function start_floor_flicker()
+
+    if flicker_running then return end
+    flicker_running = true
+
+    local function tick()
+        if not flicker_running then return end
+
+        if current_area and current_floor then
+            floor_flicker = not floor_flicker
+            update_display()
+        end
+
+        coroutine.schedule(tick, 0.5)
+    end
+
+    coroutine.schedule(tick, 0.5)
+end
+
 local function record_last_5k(area, chest)
     if not area or not chest then return end
 
@@ -472,15 +534,16 @@ local function record_last_5k(area, chest)
     update_display()
 end
 
-
 local info = windower.ffxi.get_info()
 if info then
     current_area = get_area(info.zone)
 end
+--[[
 if current_area then
     update_display()
+    start_floor_flicker()
 end
-
+]]
 local JST_OFFSET = 9 * 60 * 60
 local WEEK_SECONDS = 7 * 24 * 60 * 60
 
@@ -530,12 +593,10 @@ local function get_item_count(area, shard)
 end
 
 local function record_matter(area, count)
-
     if not MATTER_IDS[area] then
         return
     end
-
-    count = tonumber(count) or 1
+    count = tonumber(count) or 0
 
     if count <= 0 then
         return
@@ -655,26 +716,6 @@ local function check_weekly_reset()
     return false
 end
 
-local function sync_code_progress()
-
-    local owned = get_temp_items()
-    local changed = false
-
-    if owned[10044] and not settings.temenos_code_obtained then
-        settings.temenos_code_obtained = true
-        changed = true
-    end
-
-    if owned[10045] and not settings.apollyon_code_obtained then
-        settings.apollyon_code_obtained = true
-        changed = true
-    end
-
-    if changed then
-        config.save(settings)
-    end
-end
-
 local function begin_chest_check()
 
     chest_check_until = os.time() + 5
@@ -691,15 +732,20 @@ local function begin_chest_check()
 
         local matter_after, shards_after = get_item_count(area), get_item_count(nil,shard_id)
 
-        if matter_before and matter_after and matter_after > matter_before then
-            record_matter(area, matter_after - matter_before)
+        if matter_before and matter_after then
+            if matter_after > matter_before then
+                record_matter(area, matter_after - matter_before)
+            else
+                log('No matter...')
+                windower.play_sound(it_dont_matter)
+            end
         end
 
         if shards_before and shards_after and shards_after - shards_before >= 2 and chest then
             record_last_5k(area, chest)
         end
 
-    end, 5)
+    end, 6)
 end
 
 windower.register_event('add item', function(bag, index, id, count)
@@ -933,6 +979,23 @@ local function unregister_limbus_events()
     end
 end
 
+windower.register_event('time change', function()
+
+    if loaded_character then return end
+
+    if load_character_settings() then
+
+        local info = windower.ffxi.get_info()
+        current_area = info and get_area(info.zone) or nil
+
+        if current_area then
+            register_limbus_events()
+        else
+            unregister_limbus_events()
+        end
+    end
+end)
+
 windower.register_event('zone change', function(new_id, old_id)
     current_area = get_area(new_id)
     current_floor = nil
@@ -941,6 +1004,7 @@ windower.register_event('zone change', function(new_id, old_id)
         reset_check = true
         check_icon:hide()
         update_display()
+        start_floor_flicker()
     else
         unregister_limbus_events()
         reset_check = false
@@ -950,30 +1014,39 @@ windower.register_event('zone change', function(new_id, old_id)
 end)
 
 windower.register_event('login', function()
-    player_info = windower.ffxi.get_player()
-    if not player_info then
+
+    if not load_character_settings() then
         return
     end
-    settings = config.load(
-        ('data/settings_%s.xml'):format(player_info.name),
-        defaults
-    )
-    if not settings.temenos_last_5k or settings.temenos_last_5k == '' then
-        settings.temenos_last_5k = 'C'
-    end
-    if not settings.apollyon_last_5k or settings.apollyon_last_5k == '' then
-        settings.apollyon_last_5k = 'SE'
-    end
-    config.save(settings)
+
     local info = windower.ffxi.get_info()
+
     current_area = info and get_area(info.zone) or nil
+
     if current_area then
         register_limbus_events()
     else
         unregister_limbus_events()
     end
+
 end)
 
+local function random_message()
+    local numero = math.random(1,100)
+    if numero < 26 then
+        log('Did you know ?')
+        windower.add_to_chat(207,'You can open the same chest you last opened if you got 5K from it without upsettings your chest order tracking since repeat opens are ignored by tracking.')
+    elseif numero < 51 then
+        log('Did you know ?')
+        windower.add_to_chat(207,'The silver indicator points to the next chest to open as per tracking; The gold indicator points to the last chest to yield 5k.')
+    elseif numero < 76 then
+        log('Did you know ?')
+        windower.add_to_chat(207,'You can display your Matter history and count any time with "//lm matter" ')
+    elseif numero <= 100 then
+        log('Did you know ?')
+        windower.add_to_chat(207,'If you can see "Code" on your Data display it indicates you have not opened a chest with a Code for that week.')
+    end
+end
 windower.register_event('load', function()
     _Animationator.start_splash()
     local info = windower.ffxi.get_info()
@@ -981,16 +1054,19 @@ windower.register_event('load', function()
     if current_area then
         register_limbus_events()
         check_weekly_reset()
-        sync_code_progress()
         update_display()
+        start_floor_flicker()
     else
         unregister_limbus_events()
     end
-    coroutine.schedule(function()
-        if player_info then 
+    if load_character_settings() then
+        coroutine.schedule(function()
             show_matter_history()
-        end
-    end,6)
+        end,7)
+        coroutine.schedule(function()
+            random_message()
+        end,10)
+    end
 end)
 
 windower.register_event('ipc message', function(msg)
